@@ -27,28 +27,28 @@ if "pdf_path" not in st.session_state:
 
 # Sidebar
 with st.sidebar:
-    uploaded_pdf = st.file_uploader("Upload PDF manual", type=["pdf"])
+    uploaded_pdf = st.file_uploader("Upload PDF Manual", type=["pdf"])
     if uploaded_pdf:
         data_dir = Path("data")
         data_dir.mkdir(exist_ok=True)
         pdf_path = data_dir / uploaded_pdf.name
         pdf_path.write_bytes(uploaded_pdf.getbuffer())
         st.session_state.pdf_path = str(pdf_path)
-        st.success("PDF uploaded")
+        st.success(f"PDF Upload Complete")
 
-    if st.button("Ingest manual"):
+    if st.button("Ingest Manual"):
         if not st.session_state.pdf_path:
             st.error("Upload a PDF first.")
         else:
-            with st.spinner("Ingesting manual..."):
+            with st.spinner("Ingesting Manual..."):
                 retriever, _settings = ingest_manual(st.session_state.pdf_path, use_images=True)
                 st.session_state.chain = build_chain(retriever, use_images=True, answer_model="llava:7b")
                 st.session_state.ingested = True
-            st.success("Ingestion complete")
+            st.success("Ingestion Complete")
 
     st.divider()
 
-    if st.button("Clear chat"):
+    if st.button("Clear Chat"):
         st.session_state.chat = []
 
 # Render chat history
@@ -62,7 +62,7 @@ for msg in st.session_state.chat:
 
 
 # Chat input
-query = st.chat_input("Type your question here")
+query = st.chat_input("Type your question here...")
 
 if query:
     if not st.session_state.ingested or st.session_state.chain is None:
