@@ -11,6 +11,9 @@ with col1:
 
 with col2:
     st.title("Automobile Manual RAG")
+    st.caption("Ask questions about your car's manual, including images.")
+
+st.divider()
 
 # Session state init
 if "ingested" not in st.session_state:
