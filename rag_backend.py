@@ -59,7 +59,6 @@ def get_images_base64(chunks):
     return images_b64
 
 
-
 # Tooling setup (Tesseract/Poppler)
 def setup_tools():
     # Tesseract
@@ -155,7 +154,7 @@ Keep it concise but keyword-rich.
 def ingest_manual(
     pdf_path: str,
     use_images: bool = True,
-    text_model: str = "llama3.2",
+    text_model: str = "llama3.2:1b",
     vision_model: str = "llava:7b",
 ):
     """
@@ -273,7 +272,7 @@ Table or text chunk: {element}
 
 
 # Build chain + ask
-def build_chain(retriever, use_images: bool = True, answer_model: str = "llava:7b"):
+def build_chain(retriever, use_images: bool = True, answer_model: str = "llama3.2:3b"):  # ✅ UPDATED
     def parse_docs(docs_):
         b64_list = []
         text_list = []
@@ -310,7 +309,9 @@ def build_chain(retriever, use_images: bool = True, answer_model: str = "llava:7
 
         prompt_content = [{"type": "text", "text": prompt_template}]
 
-        if use_images and docs_by_type["images"]:
+        vision_capable = ("llava" in answer_model.lower()) or ("vision" in answer_model.lower())
+
+        if use_images and vision_capable and docs_by_type["images"]:
             for image in docs_by_type["images"]:
                 prompt_content.append({"type": "image_url", "image_url": f"data:image/jpeg;base64,{image}"})
 
