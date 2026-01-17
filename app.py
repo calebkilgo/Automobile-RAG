@@ -42,7 +42,7 @@ with st.sidebar:
         else:
             with st.spinner("Ingesting Manual..."):
                 retriever, _settings = ingest_manual(st.session_state.pdf_path, use_images=True)
-                st.session_state.chain = build_chain(retriever, use_images=True, answer_model="llava:7b")
+                st.session_state.chain = build_chain(retriever, use_images=True, answer_model="llama3.2:3b")
                 st.session_state.ingested = True
             st.success("Ingestion Complete")
 
