@@ -1,3 +1,4 @@
+# rag_backend.py
 from pathlib import Path
 import os
 import base64
@@ -5,6 +6,7 @@ import json
 import shutil
 import pytesseract
 from base64 import b64decode
+import uuid
 
 from unstructured.partition.pdf import partition_pdf
 
@@ -12,7 +14,6 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 
-import uuid
 from langchain_chroma import Chroma
 from langchain_core.stores import InMemoryStore
 from langchain_core.documents import Document
@@ -83,14 +84,21 @@ def setup_tools():
 
 # Caching: images + summaries
 def get_image_cache_path(pdf_path: str) -> Path:
-    return CACHE_DIR / "image_cache.json"
+    # Unique cache per PDF name (avoid collisions)
+    pdf_name = Path(pdf_path).stem
+    return CACHE_DIR / f"image_cache_{pdf_name}.json"
 
 
 def get_or_create_image_summaries(chunks, image_cache_path: Path, vision_model: str = "llava:7b"):
     if image_cache_path.exists():
         print("Loading cached image summaries")
-        with open(image_cache_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(image_cache_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                return data
+        except Exception:
+            pass
 
     print("Extracting and summarizing images (first run only)...")
 
@@ -156,18 +164,30 @@ def ingest_manual(
     use_images: bool = True,
     text_model: str = "llama3.2:1b",
     vision_model: str = "llava:7b",
+    progress_cb=None,
 ):
     """
     Build summaries + vector index + docstore.
     Returns: (retriever, settings_dict)
     """
+    def _progress(pct: int, msg: str):
+        if progress_cb:
+            try:
+                progress_cb(pct, msg)
+            except Exception:
+                pass
+
+    _progress(2, "Preparing output folders...")
     ensure_dirs()
+
+    _progress(5, "Setting up tools (Tesseract/Poppler)...")
     setup_tools()
 
     pdf_path = str(pdf_path)
     image_cache_path = get_image_cache_path(pdf_path)
 
-    # Partition
+    # Partition (FAST by default so it doesn't hang)
+    _progress(12, "Partitioning PDF (fast)...")
     partition_kwargs = dict(
         filename=pdf_path,
         infer_table_structure=True,
@@ -175,20 +195,13 @@ def ingest_manual(
         max_characters=10000,
         combine_text_under_n_chars=2000,
         new_after_n_chars=6000,
+        strategy="fast",
     )
-
-    if use_images and not image_cache_path.exists():
-        partition_kwargs.update(
-            strategy="hi_res",
-            extract_image_block_types=["Image", "Table"],
-            extract_image_block_to_payload=True,
-        )
-    else:
-        partition_kwargs.update(strategy="fast")
 
     chunks = partition_pdf(**partition_kwargs)
 
     # Separate tables, text
+    _progress(25, "Separating text and tables...")
     tables = []
     texts = []
     for chunk in chunks:
@@ -198,6 +211,7 @@ def ingest_manual(
             texts.append(chunk)
 
     # Summarize text + tables
+    _progress(40, "Summarizing text and tables...")
     prompt_text = """
 You are an assistant tasked with summarizing tables and text.
 Give a concise summary of the table or text.
@@ -216,16 +230,50 @@ Table or text chunk: {element}
     tables_html = [t.metadata.text_as_html for t in tables]
     table_summaries = summarize_chain.batch(tables_html, {"max_concurrency": 3}) if tables_html else []
 
-    # Images (cached)
+    # Images (use cache; NOTE: image extraction needs hi_res, so we do a second pass only if needed)
     image_cache = []
     images = []
     image_summaries = []
+
     if use_images:
-        image_cache = get_or_create_image_summaries(chunks, image_cache_path, vision_model=vision_model)
-        images = [item["image_base64"] for item in image_cache]
-        image_summaries = [item["summary"] for item in image_cache]
+        # Load cache if it exists
+        if image_cache_path.exists():
+            _progress(50, "Loading cached image summaries...")
+            try:
+                with open(image_cache_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, list):
+                    image_cache = data
+            except Exception:
+                image_cache = []
+
+        # If no cache, do a hi_res pass JUST for images/summaries
+        if not image_cache:
+            _progress(55, "Extracting images (hi_res) + summarizing (first run)...")
+            hi_res_kwargs = dict(
+                filename=pdf_path,
+                infer_table_structure=True,
+                chunking_strategy="by_title",
+                max_characters=10000,
+                combine_text_under_n_chars=2000,
+                new_after_n_chars=6000,
+                strategy="hi_res",
+                extract_image_block_types=["Image", "Table"],
+                extract_image_block_to_payload=True,
+            )
+            hi_res_chunks = partition_pdf(**hi_res_kwargs)
+
+            image_cache = get_or_create_image_summaries(
+                hi_res_chunks,
+                image_cache_path=image_cache_path,
+                vision_model=vision_model,
+            )
+
+        images = [c["image_base64"] for c in image_cache if c.get("image_base64")]
+        image_summaries = [c["summary"] for c in image_cache if c.get("summary")]
 
     # Vectorstore + retriever
+    _progress(70, "Building vector index...")
     vectorstore = Chroma(
         collection_name="multi_modal_rag",
         embedding_function=OllamaEmbeddings(model="nomic-embed-text"),
@@ -237,6 +285,7 @@ Table or text chunk: {element}
     retriever.search_kwargs = {"k": TOP_K_RESULTS}
 
     # Add text
+    _progress(80, "Indexing text summaries...")
     if text_summaries:
         doc_ids = [str(uuid.uuid4()) for _ in texts]
         retriever.vectorstore.add_documents(
@@ -245,6 +294,7 @@ Table or text chunk: {element}
         retriever.docstore.mset(list(zip(doc_ids, texts)))
 
     # Add tables
+    _progress(88, "Indexing table summaries...")
     if table_summaries:
         table_ids = [str(uuid.uuid4()) for _ in tables]
         retriever.vectorstore.add_documents(
@@ -254,6 +304,7 @@ Table or text chunk: {element}
 
     # Add images
     if use_images and image_summaries:
+        _progress(94, "Indexing image summaries...")
         img_ids = [str(uuid.uuid4()) for _ in image_summaries]
         retriever.vectorstore.add_documents(
             [Document(page_content=s, metadata={id_key: img_ids[i]}) for i, s in enumerate(image_summaries)]
@@ -268,6 +319,7 @@ Table or text chunk: {element}
         "image_cache_path": str(image_cache_path),
     }
 
+    _progress(100, "Ingestion complete.")
     return retriever, settings
 
 
@@ -302,10 +354,14 @@ def build_chain(retriever, use_images: bool = True, answer_model: str = "llama3.
                 context_text += getattr(text_element, "text", str(text_element)) + "\n"
 
         prompt_template = f"""
-            Answer the question based only on the following context, which can include text, tables, and images.
-            Context: {context_text}
-            Question: {user_question}
-            """
+Answer the question based only on the following context, which can include text, tables, and images.
+
+Context:
+{context_text}
+
+Question:
+{user_question}
+"""
 
         prompt_content = [{"type": "text", "text": prompt_template}]
 
@@ -315,6 +371,7 @@ def build_chain(retriever, use_images: bool = True, answer_model: str = "llama3.
             for image in docs_by_type["images"]:
                 prompt_content.append({"type": "image_url", "image_url": f"data:image/jpeg;base64,{image}"})
 
+        # IMPORTANT: pass a HumanMessage directly (ChatOllama supports this)
         return ChatPromptTemplate.from_messages([HumanMessage(content=prompt_content)])
 
     chain_with_sources = {
