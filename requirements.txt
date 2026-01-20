@@ -2,7 +2,15 @@ langchain
 langchain-core
 langchain-ollama
 langchain-chroma
-langchain-classic
+chromadb
 unstructured[pdf]
-unstructured.pytesseract
 pytesseract
+Pillow
+python-magic-bin
+
+
+
+# System Dependencies
+# Poppler (pdfinfo, pdftoppm)
+# Tesseract
+# Ollama Models
