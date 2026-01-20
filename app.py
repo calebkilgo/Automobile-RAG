@@ -1,3 +1,4 @@
+# app.py
 import streamlit as st
 from pathlib import Path
 from rag_backend import ingest_manual, build_chain, ask
@@ -11,7 +12,7 @@ with col1:
 
 with col2:
     st.title("Automobile Manual RAG")
-    st.caption("Ask questions about your car's manual, including images.")
+    st.caption("Ask questions about your car's manual, including images or tables.")
 
 st.divider()
 
@@ -34,16 +35,33 @@ with st.sidebar:
         pdf_path = data_dir / uploaded_pdf.name
         pdf_path.write_bytes(uploaded_pdf.getbuffer())
         st.session_state.pdf_path = str(pdf_path)
-        st.success(f"PDF Upload Complete")
+        st.success("PDF Upload Complete")
 
     if st.button("Ingest Manual"):
         if not st.session_state.pdf_path:
             st.error("Upload a PDF first.")
         else:
-            with st.spinner("Ingesting Manual..."):
-                retriever, _settings = ingest_manual(st.session_state.pdf_path, use_images=True)
-                st.session_state.chain = build_chain(retriever, use_images=True, answer_model="llava:7b")
-                st.session_state.ingested = True
+            progress = st.progress(0)
+            status = st.empty()
+
+            def cb(pct, msg):
+                progress.progress(int(pct))
+                status.write(msg)
+
+            retriever, _settings = ingest_manual(
+                st.session_state.pdf_path,
+                use_images=True,
+                progress_cb=cb,
+            )
+
+            # Enable images in the answering prompt
+            st.session_state.chain = build_chain(
+                retriever,
+                use_images=True,
+                answer_model="llava:7b",
+            )
+
+            st.session_state.ingested = True
             st.success("Ingestion Complete")
 
     st.divider()
@@ -59,7 +77,6 @@ for msg in st.session_state.chat:
             cols = st.columns(min(3, len(msg["images"])))
             for i, img_b64 in enumerate(msg["images"][:3]):
                 cols[i].image(f"data:image/png;base64,{img_b64}", use_container_width=True)
-
 
 # Chat input
 query = st.chat_input("Type your question here...")
