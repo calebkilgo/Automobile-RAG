@@ -29,8 +29,8 @@ DATA_DIR = "data"
 CACHE_DIR = Path("cache")
 CACHE_DIR.mkdir(exist_ok=True)
 
-MAX_SAVE_EXTRACTED_IMAGES = 20
-MAX_IMAGE_SUMMARIES = 20
+MAX_SAVE_EXTRACTED_IMAGES = 100
+MAX_IMAGE_SUMMARIES = 75
 
 TOP_K_RESULTS = 10
 TOP_K_IMAGES_PER_QUERY = 3
@@ -324,7 +324,7 @@ Table or text chunk: {element}
 
 
 # Build chain + ask
-def build_chain(retriever, use_images: bool = True, answer_model: str = "llava:7b"):
+def build_chain(retriever, use_images: bool = True, answer_model: str = "llama3.2:3b"):  # ✅ UPDATED
     def parse_docs(docs_):
         b64_list = []
         text_list = []
@@ -365,7 +365,9 @@ Question:
 
         prompt_content = [{"type": "text", "text": prompt_template}]
 
-        if use_images and docs_by_type["images"]:
+        vision_capable = ("llava" in answer_model.lower()) or ("vision" in answer_model.lower())
+
+        if use_images and vision_capable and docs_by_type["images"]:
             for image in docs_by_type["images"]:
                 prompt_content.append({"type": "image_url", "image_url": f"data:image/jpeg;base64,{image}"})
 

@@ -1,0 +1,8 @@
+langchain
+langchain-core
+langchain-ollama
+langchain-chroma
+langchain-classic
+unstructured[pdf]
+unstructured.pytesseract
+pytesseract
