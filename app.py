@@ -22,9 +22,11 @@ if "ingested" not in st.session_state:
 if "chain" not in st.session_state:
     st.session_state.chain = None
 if "chat" not in st.session_state:
-    st.session_state.chat = []
+    st.session_state.chat = []  # list of {"role": "user"/"assistant", "content": str, "images": [b64]}
 if "pdf_path" not in st.session_state:
     st.session_state.pdf_path = None
+if "use_images" not in st.session_state:
+    st.session_state.use_images = True
 
 # Sidebar
 with st.sidebar:
@@ -36,6 +38,11 @@ with st.sidebar:
         pdf_path.write_bytes(uploaded_pdf.getbuffer())
         st.session_state.pdf_path = str(pdf_path)
         st.success("PDF Upload Complete")
+
+    st.session_state.use_images = st.checkbox(
+        "Use images (slower)",
+        value=st.session_state.use_images,
+    )
 
     if st.button("Ingest Manual"):
         if not st.session_state.pdf_path:
@@ -50,15 +57,15 @@ with st.sidebar:
 
             retriever, _settings = ingest_manual(
                 st.session_state.pdf_path,
-                use_images=True,
+                use_images=st.session_state.use_images,
                 progress_cb=cb,
             )
 
-            # Enable images in the answering prompt
+            answer_model = "llava:7b" if st.session_state.use_images else "llama3.2:3b"
             st.session_state.chain = build_chain(
                 retriever,
-                use_images=True,
-                answer_model="llava:7b",
+                use_images=st.session_state.use_images,
+                answer_model=answer_model,
             )
 
             st.session_state.ingested = True
@@ -69,16 +76,29 @@ with st.sidebar:
     if st.button("Clear Chat"):
         st.session_state.chat = []
 
-# Render chat history
+# CHAT HISTORY (shows user then assistant)
 for msg in st.session_state.chat:
-    with st.chat_message(msg["role"]):
-        st.write(msg["content"])
-        if msg.get("images"):
-            cols = st.columns(min(3, len(msg["images"])))
-            for i, img_b64 in enumerate(msg["images"][:3]):
-                cols[i].image(f"data:image/png;base64,{img_b64}", use_container_width=True)
+    role = msg.get("role", "assistant")
+    content = msg.get("content", "")
 
-# Chat input
+    with st.chat_message(role):
+        st.markdown(content)
+
+        # Show images only for assistant messages (and only if enabled)
+        if (
+            st.session_state.use_images
+            and role == "assistant"
+            and msg.get("images")
+        ):
+            imgs = msg["images"][:3]
+            cols = st.columns(min(3, len(imgs)))
+            for i, img_b64 in enumerate(imgs):
+                cols[i].image(
+                    f"data:image/png;base64,{img_b64}",
+                    use_container_width=True
+                )
+
+# New Message
 query = st.chat_input("Type your question here...")
 
 if query:
@@ -91,7 +111,11 @@ if query:
             answer, images_b64 = ask(st.session_state.chain, query)
 
         st.session_state.chat.append(
-            {"role": "assistant", "content": answer, "images": images_b64}
+            {
+                "role": "assistant",
+                "content": answer,
+                "images": images_b64 if st.session_state.use_images else [],
+            }
         )
 
         st.rerun()

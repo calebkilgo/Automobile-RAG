@@ -324,64 +324,133 @@ Table or text chunk: {element}
 
 
 # Build chain + ask
-def build_chain(retriever, use_images: bool = True, answer_model: str = "llama3.2:3b"):  # ✅ UPDATED
+def build_chain(
+    retriever,
+    use_images: bool = True,
+    answer_model: str = "llama3.2:3b",
+):
+
+    # Pull more candidates so we can choose text over images
+    try:
+        retriever.search_kwargs = {"k": max(TOP_K_RESULTS * 4, 20)}
+    except Exception:
+        pass
+
+    MAX_TEXT_CHUNKS = 8
+    MAX_IMAGE_ATTACH = TOP_K_IMAGES_PER_QUERY
+
+    PROCEDURE_HINTS = (
+        "how do", "how to", "steps", "procedure", "remove", "install", "replace",
+        "disconnect", "reconnect", "tighten", "loosen", "torque", "battery removal",
+        "service plug", "hv battery", "hybrid battery"
+    )
+
+    VISUAL_HINTS = (
+        "where", "location", "located", "diagram", "picture", "image", "shown",
+        "what does it look like", "identify", "which one", "point to"
+    )
+
+    def is_probably_base64(s: str) -> bool:
+        if not isinstance(s, str):
+            return False
+        if len(s) < 200:
+            return False
+        if any(c.isspace() for c in s):
+            return False
+        try:
+            b64decode(s, validate=True)
+            return True
+        except Exception:
+            return False
+
+    def chunk_to_text(obj) -> str:
+        if hasattr(obj, "text") and isinstance(getattr(obj, "text"), str):
+            return obj.text
+        if hasattr(obj, "metadata") and getattr(obj.metadata, "text_as_html", None):
+            return str(obj.metadata.text_as_html)
+        return str(obj)
+
     def parse_docs(docs_):
-        b64_list = []
-        text_list = []
-        for doc in docs_:
-            content = getattr(doc, "page_content", doc)
+        images_b64 = []
+        text_chunks = []
 
-            if isinstance(content, str):
-                try:
-                    b64decode(content, validate=True)
-                    if len(b64_list) < TOP_K_IMAGES_PER_QUERY:
-                        b64_list.append(content)
-                    continue
-                except Exception:
-                    pass
+        for d in docs_:
+            content = getattr(d, "page_content", d)
 
-            text_list.append(doc)
+            # Images are stored as raw base64 strings in docstore
+            if isinstance(content, str) and is_probably_base64(content):
+                if len(images_b64) < MAX_IMAGE_ATTACH:
+                    images_b64.append(content)
+                continue
 
-        return {"images": b64_list, "texts": text_list}
+            text_chunks.append(d)
 
-    def build_prompt(kwargs):
+        # Prefer text
+        text_chunks = text_chunks[:MAX_TEXT_CHUNKS]
+        return {"images": images_b64, "texts": text_chunks}
+
+    def should_attach_images(question: str) -> bool:
+        q = (question or "").lower()
+
+        # If it’s a procedure/steps question, DO NOT attach images by default.
+        if any(h in q for h in PROCEDURE_HINTS):
+            return False
+
+        # If it’s visual/location/identification, images can help.
+        if any(h in q for h in VISUAL_HINTS):
+            return True
+
+        # Default: don’t attach (keeps answers grounded in text)
+        return False
+
+    def build_messages(kwargs):
         docs_by_type = kwargs["context"]
         user_question = kwargs["question"]
 
         context_text = ""
-        if docs_by_type["texts"]:
-            for text_element in docs_by_type["texts"]:
-                context_text += getattr(text_element, "text", str(text_element)) + "\n"
+        for el in docs_by_type.get("texts", []):
+            context_text += chunk_to_text(el).strip() + "\n\n"
 
-        prompt_template = f"""
-Answer the question based only on the following context, which can include text, tables, and images.
+        rules = (
+            "You must answer using the TEXT CONTEXT below.\n"
+            "- For step-by-step procedures, rely on text instructions.\n"
+            "- Images are optional supporting evidence only.\n"
+            "- If the text contains the procedure, give the steps clearly.\n"
+            "- Do NOT say you cannot answer just because an image is blurry.\n"
+            "- If the text does NOT contain the answer, say you cannot find it.\n"
+        )
 
-Context:
-{context_text}
+        prompt = f"""{rules}
 
-Question:
+TEXT CONTEXT:
+{context_text if context_text.strip() else "[No relevant text retrieved]"}
+
+QUESTION:
 {user_question}
 """
 
-        prompt_content = [{"type": "text", "text": prompt_template}]
+        prompt_content = [{"type": "text", "text": prompt}]
 
         vision_capable = ("llava" in answer_model.lower()) or ("vision" in answer_model.lower())
+        attach_images = use_images and vision_capable and docs_by_type.get("images") and should_attach_images(user_question)
 
-        if use_images and vision_capable and docs_by_type["images"]:
+        if attach_images:
             for image in docs_by_type["images"]:
-                prompt_content.append({"type": "image_url", "image_url": f"data:image/jpeg;base64,{image}"})
+                prompt_content.append(
+                    {"type": "image_url", "image_url": f"data:image/jpeg;base64,{image}"}
+                )
 
-        # IMPORTANT: pass a HumanMessage directly (ChatOllama supports this)
-        return ChatPromptTemplate.from_messages([HumanMessage(content=prompt_content)])
+        return [HumanMessage(content=prompt_content)]
 
     chain_with_sources = {
         "context": retriever | RunnableLambda(parse_docs),
         "question": RunnablePassthrough(),
     } | RunnablePassthrough().assign(
-        response=(RunnableLambda(build_prompt) | ChatOllama(model=answer_model) | StrOutputParser())
+        response=(RunnableLambda(build_messages) | ChatOllama(model=answer_model) | StrOutputParser())
     )
 
     return chain_with_sources
+
 
 
 def ask(chain, query: str):
